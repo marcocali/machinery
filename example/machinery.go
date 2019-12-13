@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
-	"errors"
+	"database/sql"
 	"fmt"
 	"os"
 	"time"
 
+	"github.com/ExpansiveWorlds/instrumentedsql"
+	opentracingsql "github.com/ExpansiveWorlds/instrumentedsql/opentracing"
+	"github.com/lib/pq"
 	opentracing "github.com/opentracing/opentracing-go"
 	opentracing_log "github.com/opentracing/opentracing-go/log"
 
@@ -17,8 +20,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/urfave/cli"
 
-	exampletasks "github.com/RichardKnop/machinery/example/tasks"
 	tracers "github.com/RichardKnop/machinery/example/tracers"
+
+	"github.com/jmoiron/sqlx"
 )
 
 var (
@@ -93,19 +97,51 @@ func startServer() (*machinery.Server, error) {
 		return nil, err
 	}
 
+	db, err := NewDatabase()
+	if err != nil {
+		return nil, err
+	}
+
 	// Register tasks
 	tasks := map[string]interface{}{
-		"add":               exampletasks.Add,
-		"multiply":          exampletasks.Multiply,
-		"sum_ints":          exampletasks.SumInts,
-		"sum_floats":        exampletasks.SumFloats,
-		"concat":            exampletasks.Concat,
-		"split":             exampletasks.Split,
-		"panic_task":        exampletasks.PanicTask,
-		"long_running_task": exampletasks.LongRunningTask,
+		"my_func":   enhance(db, nil),
+		"my_func_2": enhance(db, nil),
 	}
 
 	return server, server.RegisterTasks(tasks)
+}
+
+// MyFunc ...
+type MyFunc func() (int, error)
+
+// NewDatabase ...
+func NewDatabase() (*sqlx.DB, error) {
+	sql.Register("instrumented-postgres", instrumentedsql.WrapDriver(&pq.Driver{}, instrumentedsql.WithTracer(opentracingsql.NewTracer())))
+	sqldb, err := sql.Open("instrumented-postgres", "postgres://content:password@0.0.0.0:32777/content?sslmode=disable")
+	if err != nil {
+		log.ERROR.Println(err)
+		return nil, err
+	}
+
+	db := sqlx.NewDb(sqldb, "postgres")
+
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(100)
+
+	return db, nil
+}
+
+func enhance(db *sqlx.DB, err error) MyFunc {
+	return func() (int, error) {
+		rows, err := db.QueryxContext(context.Background(), `SELECT * FROM "source";`)
+		defer rows.Close()
+		var c int
+		for rows.Next() {
+			c++
+		}
+		return c, err
+	}
 }
 
 func worker() error {
@@ -160,116 +196,15 @@ func send() error {
 	}
 
 	var (
-		addTask0, addTask1, addTask2                      tasks.Signature
-		multiplyTask0, multiplyTask1                      tasks.Signature
-		sumIntsTask, sumFloatsTask, concatTask, splitTask tasks.Signature
-		panicTask                                         tasks.Signature
-		longRunningTask                                   tasks.Signature
+		myFunc, myFunc2 tasks.Signature
 	)
 
 	var initTasks = func() {
-		addTask0 = tasks.Signature{
-			Name: "add",
-			Args: []tasks.Arg{
-				{
-					Type:  "int64",
-					Value: 1,
-				},
-				{
-					Type:  "int64",
-					Value: 1,
-				},
-			},
+		myFunc = tasks.Signature{
+			Name: "my_func",
 		}
-
-		addTask1 = tasks.Signature{
-			Name: "add",
-			Args: []tasks.Arg{
-				{
-					Type:  "int64",
-					Value: 2,
-				},
-				{
-					Type:  "int64",
-					Value: 2,
-				},
-			},
-		}
-
-		addTask2 = tasks.Signature{
-			Name: "add",
-			Args: []tasks.Arg{
-				{
-					Type:  "int64",
-					Value: 5,
-				},
-				{
-					Type:  "int64",
-					Value: 6,
-				},
-			},
-		}
-
-		multiplyTask0 = tasks.Signature{
-			Name: "multiply",
-			Args: []tasks.Arg{
-				{
-					Type:  "int64",
-					Value: 4,
-				},
-			},
-		}
-
-		multiplyTask1 = tasks.Signature{
-			Name: "multiply",
-		}
-
-		sumIntsTask = tasks.Signature{
-			Name: "sum_ints",
-			Args: []tasks.Arg{
-				{
-					Type:  "[]int64",
-					Value: []int64{1, 2},
-				},
-			},
-		}
-
-		sumFloatsTask = tasks.Signature{
-			Name: "sum_floats",
-			Args: []tasks.Arg{
-				{
-					Type:  "[]float64",
-					Value: []float64{1.5, 2.7},
-				},
-			},
-		}
-
-		concatTask = tasks.Signature{
-			Name: "concat",
-			Args: []tasks.Arg{
-				{
-					Type:  "[]string",
-					Value: []string{"foo", "bar"},
-				},
-			},
-		}
-
-		splitTask = tasks.Signature{
-			Name: "split",
-			Args: []tasks.Arg{
-				{
-					Type:  "string",
-					Value: "foo",
-				},
-			},
-		}
-
-		panicTask = tasks.Signature{
-			Name: "panic_task",
-		}
-
-		longRunningTask = tasks.Signature{
-			Name: "long_running_task",
+		myFunc2 = tasks.Signature{
+			Name: "my_func_2",
 		}
 	}
 
@@ -291,75 +226,7 @@ func send() error {
 	 */
 	initTasks()
 
-	log.INFO.Println("Single task:")
-
-	asyncResult, err := server.SendTaskWithContext(ctx, &addTask0)
-	if err != nil {
-		return fmt.Errorf("Could not send task: %s", err.Error())
-	}
-
-	results, err := asyncResult.Get(time.Duration(time.Millisecond * 5))
-	if err != nil {
-		return fmt.Errorf("Getting task result failed with error: %s", err.Error())
-	}
-	log.INFO.Printf("1 + 1 = %v\n", tasks.HumanReadableResults(results))
-
-	/*
-	 * Try couple of tasks with a slice argument and slice return value
-	 */
-	asyncResult, err = server.SendTaskWithContext(ctx, &sumIntsTask)
-	if err != nil {
-		return fmt.Errorf("Could not send task: %s", err.Error())
-	}
-
-	results, err = asyncResult.Get(time.Duration(time.Millisecond * 5))
-	if err != nil {
-		return fmt.Errorf("Getting task result failed with error: %s", err.Error())
-	}
-	log.INFO.Printf("sum([1, 2]) = %v\n", tasks.HumanReadableResults(results))
-
-	asyncResult, err = server.SendTaskWithContext(ctx, &sumFloatsTask)
-	if err != nil {
-		return fmt.Errorf("Could not send task: %s", err.Error())
-	}
-
-	results, err = asyncResult.Get(time.Duration(time.Millisecond * 5))
-	if err != nil {
-		return fmt.Errorf("Getting task result failed with error: %s", err.Error())
-	}
-	log.INFO.Printf("sum([1.5, 2.7]) = %v\n", tasks.HumanReadableResults(results))
-
-	asyncResult, err = server.SendTaskWithContext(ctx, &concatTask)
-	if err != nil {
-		return fmt.Errorf("Could not send task: %s", err.Error())
-	}
-
-	results, err = asyncResult.Get(time.Duration(time.Millisecond * 5))
-	if err != nil {
-		return fmt.Errorf("Getting task result failed with error: %s", err.Error())
-	}
-	log.INFO.Printf("concat([\"foo\", \"bar\"]) = %v\n", tasks.HumanReadableResults(results))
-
-	asyncResult, err = server.SendTaskWithContext(ctx, &splitTask)
-	if err != nil {
-		return fmt.Errorf("Could not send task: %s", err.Error())
-	}
-
-	results, err = asyncResult.Get(time.Duration(time.Millisecond * 5))
-	if err != nil {
-		return fmt.Errorf("Getting task result failed with error: %s", err.Error())
-	}
-	log.INFO.Printf("split([\"foo\"]) = %v\n", tasks.HumanReadableResults(results))
-
-	/*
-	 * Now let's explore ways of sending multiple tasks
-	 */
-
-	// Now let's try a parallel execution
-	initTasks()
-	log.INFO.Println("Group of tasks (parallel execution):")
-
-	group, err := tasks.NewGroup(&addTask0, &addTask1, &addTask2)
+	group, err := tasks.NewGroup(&myFunc, &myFunc2, &myFunc, &myFunc2)
 	if err != nil {
 		return fmt.Errorf("Error creating group: %s", err.Error())
 	}
@@ -370,88 +237,15 @@ func send() error {
 	}
 
 	for _, asyncResult := range asyncResults {
-		results, err = asyncResult.Get(time.Duration(time.Millisecond * 5))
+		results, err := asyncResult.Get(time.Duration(time.Millisecond * 5))
 		if err != nil {
 			return fmt.Errorf("Getting task result failed with error: %s", err.Error())
 		}
 		log.INFO.Printf(
-			"%v + %v = %v\n",
-			asyncResult.Signature.Args[0].Value,
-			asyncResult.Signature.Args[1].Value,
+			"Number of sources: %s\n",
 			tasks.HumanReadableResults(results),
 		)
 	}
-
-	// Now let's try a group with a chord
-	initTasks()
-	log.INFO.Println("Group of tasks with a callback (chord):")
-
-	group, err = tasks.NewGroup(&addTask0, &addTask1, &addTask2)
-	if err != nil {
-		return fmt.Errorf("Error creating group: %s", err.Error())
-	}
-
-	chord, err := tasks.NewChord(group, &multiplyTask1)
-	if err != nil {
-		return fmt.Errorf("Error creating chord: %s", err)
-	}
-
-	chordAsyncResult, err := server.SendChordWithContext(ctx, chord, 10)
-	if err != nil {
-		return fmt.Errorf("Could not send chord: %s", err.Error())
-	}
-
-	results, err = chordAsyncResult.Get(time.Duration(time.Millisecond * 5))
-	if err != nil {
-		return fmt.Errorf("Getting chord result failed with error: %s", err.Error())
-	}
-	log.INFO.Printf("(1 + 1) * (2 + 2) * (5 + 6) = %v\n", tasks.HumanReadableResults(results))
-
-	// Now let's try chaining task results
-	initTasks()
-	log.INFO.Println("Chain of tasks:")
-
-	chain, err := tasks.NewChain(&addTask0, &addTask1, &addTask2, &multiplyTask0)
-	if err != nil {
-		return fmt.Errorf("Error creating chain: %s", err)
-	}
-
-	chainAsyncResult, err := server.SendChainWithContext(ctx, chain)
-	if err != nil {
-		return fmt.Errorf("Could not send chain: %s", err.Error())
-	}
-
-	results, err = chainAsyncResult.Get(time.Duration(time.Millisecond * 5))
-	if err != nil {
-		return fmt.Errorf("Getting chain result failed with error: %s", err.Error())
-	}
-	log.INFO.Printf("(((1 + 1) + (2 + 2)) + (5 + 6)) * 4 = %v\n", tasks.HumanReadableResults(results))
-
-	// Let's try a task which throws panic to make sure stack trace is not lost
-	initTasks()
-	asyncResult, err = server.SendTaskWithContext(ctx, &panicTask)
-	if err != nil {
-		return fmt.Errorf("Could not send task: %s", err.Error())
-	}
-
-	_, err = asyncResult.Get(time.Duration(time.Millisecond * 5))
-	if err == nil {
-		return errors.New("Error should not be nil if task panicked")
-	}
-	log.INFO.Printf("Task panicked and returned error = %v\n", err.Error())
-
-	// Let's try a long running task
-	initTasks()
-	asyncResult, err = server.SendTaskWithContext(ctx, &longRunningTask)
-	if err != nil {
-		return fmt.Errorf("Could not send task: %s", err.Error())
-	}
-
-	results, err = asyncResult.Get(time.Duration(time.Millisecond * 5))
-	if err != nil {
-		return fmt.Errorf("Getting long running task result failed with error: %s", err.Error())
-	}
-	log.INFO.Printf("Long running task returned = %v\n", tasks.HumanReadableResults(results))
 
 	return nil
 }

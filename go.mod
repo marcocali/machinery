@@ -3,6 +3,7 @@ module github.com/RichardKnop/machinery
 require (
 	cloud.google.com/go/pubsub v1.0.1
 	cloud.google.com/go/storage v1.1.0 // indirect
+	github.com/ExpansiveWorlds/instrumentedsql v0.0.0-20171218214018-45abb4b1947d
 	github.com/RichardKnop/logging v0.0.0-20190827224416-1a693bdd4fae
 	github.com/RichardKnop/redsync v1.2.0
 	github.com/aws/aws-sdk-go v1.25.8
@@ -14,8 +15,10 @@ require (
 	github.com/golang/snappy v0.0.1 // indirect
 	github.com/gomodule/redigo v2.0.0+incompatible
 	github.com/google/uuid v1.1.1
+	github.com/jmoiron/sqlx v1.2.0
 	github.com/jstemmer/go-junit-report v0.9.1 // indirect
 	github.com/kelseyhightower/envconfig v1.4.0
+	github.com/lib/pq v1.2.0
 	github.com/onsi/ginkgo v1.10.0 // indirect
 	github.com/onsi/gomega v1.7.0 // indirect
 	github.com/opentracing/opentracing-go v1.1.0
